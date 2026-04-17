@@ -42,6 +42,23 @@ with lib; let
     ++ optionals fcfg.quiet ["--quiet"]
     ++ optionals (fcfg.workspace != null) ["--workspace" fcfg.workspace]
     ++ optionals (fcfg.githubTokenFile != null) ["--github-token-file" fcfg.githubTokenFile];
+
+  # Paths to `nix` and `git` binaries that the flake-update daemon shells out
+  # to. launchd and systemd don't inherit the user's interactive shell PATH,
+  # so we give them an explicit one that covers:
+  #   - /run/current-system/sw/bin       (nix-darwin system profile — nix)
+  #   - /etc/profiles/per-user/$USER/bin (home-manager profile — git)
+  #   - /nix/var/nix/profiles/default/bin (global default profile)
+  #   - /usr/bin, /bin                    (stock OS utilities — /bin/sh etc.)
+  flakeUpdatePath =
+    if isDarwin
+    then "/run/current-system/sw/bin:/etc/profiles/per-user/${config.home.username}/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    else "/run/current-system/sw/bin:/etc/profiles/per-user/${config.home.username}/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin";
+
+  flakeUpdateEnv = {
+    PATH = flakeUpdatePath;
+    HOME = config.home.homeDirectory;
+  };
 in {
   options.services.tend.daemon = {
     enable = mkOption {
@@ -262,6 +279,7 @@ in {
         label = "io.pleme.tend-flake-update";
         command = "${fcfg.package}/bin/tend";
         args = flakeUpdateArgs;
+        env = flakeUpdateEnv;
         logDir = logDir;
       })
 
@@ -309,6 +327,7 @@ in {
         description = "Tend flake-update daemon — propagate flake.lock updates";
         command = "${fcfg.package}/bin/tend";
         args = flakeUpdateArgs;
+        env = flakeUpdateEnv;
       })
 
       {
