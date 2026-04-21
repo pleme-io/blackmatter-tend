@@ -1,0 +1,22 @@
+schema_version: 1
+manifest:
+  name: blackmatter-tend
+  kind: BlackmatterComponent
+  archetype: blackmatter-component-hm-only
+  description: home-manager service for tend daemon — workspace repo sync and version watch.
+dimensions:
+  vocabulary: [tend, workspace, repo-sync, daemon]
+  domains: [Nix, YAML]
+  stack: [HomeManager]
+  modules:
+    home_manager: module/
+  render:
+    produces:
+      - "~/.config/tend/config.yaml"
+      - "tend launchd agent (Darwin) / systemd user service (Linux)"
+  compliance:
+    satisfies: []
+    participates: []
+  dag:
+    inputs: [nixpkgs, substrate]
+  attestation: { merkle_root: null, signed_by: null, producer: blackmatter-component-flake.nix }
