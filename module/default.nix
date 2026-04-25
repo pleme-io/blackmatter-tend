@@ -55,10 +55,14 @@ with lib; let
     then "/run/current-system/sw/bin:/etc/profiles/per-user/${config.home.username}/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     else "/run/current-system/sw/bin:/etc/profiles/per-user/${config.home.username}/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin";
 
-  flakeUpdateEnv = {
-    PATH = flakeUpdatePath;
-    HOME = config.home.homeDirectory;
-  };
+  flakeUpdateEnv =
+    {
+      PATH = flakeUpdatePath;
+      HOME = config.home.homeDirectory;
+    }
+    // fcfg.extraEnv;
+
+  daemonEnv = {} // cfg.extraEnv;
 in {
   options.services.tend.daemon = {
     enable = mkOption {
@@ -101,6 +105,17 @@ in {
       type = types.nullOr types.str;
       default = null;
       description = "Path to file containing GitHub token (for launchd/systemd environments where env vars aren't inherited)";
+    };
+
+    extraEnv = mkOption {
+      type = types.attrsOf types.str;
+      default = {};
+      description = ''
+        Extra environment variables to set on the daemon's launchd/systemd
+        service. Useful for opt-in feature flags (e.g.
+        `TEND_PRUNE_DIRENV = "1"`) without rebuilding the upstream tend
+        binary or extending this module's option set.
+      '';
     };
 
     logRotation = {
@@ -174,6 +189,18 @@ in {
       description = "Path to file containing GitHub token (for launchd/systemd environments where env vars aren't inherited)";
     };
 
+    extraEnv = mkOption {
+      type = types.attrsOf types.str;
+      default = {};
+      description = ''
+        Extra environment variables to set on the flake-update daemon's
+        launchd/systemd service, merged on top of the defaults (PATH,
+        HOME). Used for opt-in feature flags consumed by the tend binary,
+        notably `TEND_PRUNE_DIRENV = "1"` to fire `seibi direnv-prune`
+        after each successful flake.lock bump.
+      '';
+    };
+
     logRotation = {
       maxSize = mkOption {
         type = types.str;
@@ -210,6 +237,7 @@ in {
         label = "io.pleme.tend-daemon";
         command = "${cfg.package}/bin/tend";
         args = daemonArgs;
+        env = daemonEnv;
         logDir = logDir;
       })
 
@@ -358,6 +386,7 @@ in {
         description = "Tend workspace daemon — sync + fetch repos";
         command = "${cfg.package}/bin/tend";
         args = daemonArgs;
+        env = daemonEnv;
       })
 
       # logrotate config for Linux
