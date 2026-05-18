@@ -48,26 +48,38 @@ with lib; let
     ++ optionals (fcfg.workspace != null) ["--workspace" fcfg.workspace]
     ++ optionals (fcfg.githubTokenFile != null) ["--github-token-file" fcfg.githubTokenFile];
 
-  # Paths to `nix` and `git` binaries that the flake-update daemon shells out
-  # to. launchd and systemd don't inherit the user's interactive shell PATH,
+  # Paths to binaries the tend daemons shell out to (nix, git, gh, etc.).
+  # launchd and systemd don't inherit the user's interactive shell PATH,
   # so we give them an explicit one that covers:
   #   - /run/current-system/sw/bin       (nix-darwin system profile — nix)
-  #   - /etc/profiles/per-user/$USER/bin (home-manager profile — git)
+  #   - /etc/profiles/per-user/$USER/bin (home-manager profile — git, gh,
+  #                                       and any other CLI installed via HM)
   #   - /nix/var/nix/profiles/default/bin (global default profile)
   #   - /usr/bin, /bin                    (stock OS utilities — /bin/sh etc.)
-  flakeUpdatePath =
+  #
+  # Both the reconcile daemon and the flake-update daemon use the same
+  # PATH — the reconcile daemon invokes `gh auth git-credential` via git's
+  # credential helper chain, so missing `gh` shows up in `tend report` as
+  # `pull failed — gh: command not found`. One shared PATH constant
+  # ensures both daemons stay in sync.
+  tendPath =
     if isDarwin
     then "/run/current-system/sw/bin:/etc/profiles/per-user/${config.home.username}/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     else "/run/current-system/sw/bin:/etc/profiles/per-user/${config.home.username}/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin";
 
   flakeUpdateEnv =
     {
-      PATH = flakeUpdatePath;
+      PATH = tendPath;
       HOME = config.home.homeDirectory;
     }
     // fcfg.extraEnv;
 
-  daemonEnv = {} // cfg.extraEnv;
+  daemonEnv =
+    {
+      PATH = tendPath;
+      HOME = config.home.homeDirectory;
+    }
+    // cfg.extraEnv;
 in {
   options.services.tend.daemon = {
     enable = mkOption {
