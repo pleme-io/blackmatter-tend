@@ -37,6 +37,7 @@ with lib; let
     ++ optionals (cfg.workspace != null) ["--workspace" cfg.workspace]
     ++ ["--pull" (if cfg.pull then "true" else "false")]
     ++ ["--fetch" (if cfg.fetch then "true" else "false")]
+    ++ ["--max-inflight" (toString cfg.maxInflight)]
     ++ optionals (cfg.githubTokenFile != null) ["--github-token-file" cfg.githubTokenFile];
 
   flakeUpdateArgs =
@@ -73,10 +74,28 @@ in {
       type = types.bool;
       default = false;
       description = ''
-        Enable the tend daemon — a workspace reconciler that drives the
-        on-disk state toward the org's current state on a fixed interval.
-        Each cycle: sync (clone missing) + pull (fast-forward clean) +
-        watch (detect new versions). Configurable via `pull` and `fetch`.
+        Enable the tend daemon — a workspace reconciler that drives
+        the on-disk state toward the org's current state on a fixed
+        interval. Each cycle (when pull=true) is one scheduler-driven
+        reconcile pass: per-repo SyncRepoJob → PullRepoJob via Dag
+        edges, bounded by the `maxInflight` per-kind Budget, with
+        Exponential retry for transient invocation errors and an
+        Exponential reaction wave for the "no such ref" pull-failure
+        class.
+
+        Side products written under ~/.local/share/tend (XDG_DATA_HOME):
+          - audit.jsonl                — high-level domain events
+                                          (pull_completed, watch_event)
+          - scheduler-transitions.jsonl — every FSM transition the
+                                          scheduler emits
+          - drift-events.jsonl          — typed DriftEvents (stub-
+                                          directory, dirty-tree,
+                                          pull-failed, etc.)
+
+        Operators read all three via `tend report` + `tend doctor`.
+
+        Configurable via `pull`, `fetch`, `maxInflight` (substrate
+        knobs) and `interval`, `quiet`, `workspace` (operational knobs).
       '';
     };
 
@@ -120,6 +139,26 @@ in {
         `pull` is false. Kept so a fetch-only daemon remains expressible
         and so legacy operators who relied on the old fetch-only behavior
         can opt back into it explicitly (`pull = false; fetch = true;`).
+      '';
+    };
+
+    maxInflight = mkOption {
+      type = types.int;
+      default = 16;
+      description = ''
+        Maximum concurrent `git pull` Jobs per workspace per cycle.
+        Bounds the shigoto-scheduler's per-kind Budget for the
+        `tend.pull-repo` kind so a workspace with hundreds of repos
+        doesn't saturate file handles, SSH connection multiplexers, or
+        network sockets. 16 is conservative for typical broadband; tune
+        upward if reconcile latency matters more than per-pull
+        reliability, downward if SSH/Multiplexer collisions surface in
+        the transition log.
+
+        Substrate path: this flag passes through to
+        `reconcile_workspace_sync_then_pull(workspace, repos, max_inflight, ...)`
+        which installs a `BudgetSpec::max_concurrent(N)` against
+        `tend.pull-repo`, `tend.sync-repo`, and `tend.fetch-repo` kinds.
       '';
     };
 
