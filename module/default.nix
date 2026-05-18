@@ -1,7 +1,7 @@
 # Tend home-manager module — persistent background services
 #
 # Namespaces:
-#   services.tend.daemon.*       — sync + fetch repos on interval
+#   services.tend.daemon.*       — sync + pull repos on interval (reconciler)
 #   services.tend.flakeUpdate.*  — idempotent flake.lock propagation loop
 #
 # Both are opt-in, independent services running under launchd (Darwin) or
@@ -27,12 +27,16 @@ with lib; let
     then "${config.home.homeDirectory}/Library/Logs"
     else "${config.home.homeDirectory}/.local/share/tend/logs";
 
-  # Build the full argument list for `tend daemon`
+  # Build the full argument list for `tend daemon`.
+  # `pull` is the reconciler default — fast-forwards clean repos every cycle.
+  # `fetch` only matters when pull is off (operator opted into fetch-only mode);
+  # tend's binary treats pull as a strict superset of fetch.
   daemonArgs =
     ["daemon" "--interval" (toString cfg.interval)]
     ++ optionals cfg.quiet ["--quiet"]
     ++ optionals (cfg.workspace != null) ["--workspace" cfg.workspace]
-    ++ optionals cfg.fetch ["--fetch"]
+    ++ ["--pull" (if cfg.pull then "true" else "false")]
+    ++ ["--fetch" (if cfg.fetch then "true" else "false")]
     ++ optionals (cfg.githubTokenFile != null) ["--github-token-file" cfg.githubTokenFile];
 
   flakeUpdateArgs =
@@ -68,7 +72,12 @@ in {
     enable = mkOption {
       type = types.bool;
       default = false;
-      description = "Enable tend daemon service (sync + fetch repos on interval)";
+      description = ''
+        Enable the tend daemon — a workspace reconciler that drives the
+        on-disk state toward the org's current state on a fixed interval.
+        Each cycle: sync (clone missing) + pull (fast-forward clean) +
+        watch (detect new versions). Configurable via `pull` and `fetch`.
+      '';
     };
 
     package = mkOption {
@@ -89,10 +98,29 @@ in {
       description = "Limit to a specific workspace by name (null = all workspaces)";
     };
 
+    pull = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Fast-forward clean repos every cycle (`git pull --ff-only`). This
+        is the reconciler behavior — drives the workspace toward the
+        org's current state continuously. Pull subsumes fetch (the
+        underlying `git pull --ff-only` does its own fetch), so when
+        `pull` is true the `fetch` setting is a no-op. Set to false to
+        leave clean repos exactly where the operator parked them
+        (operator runs `tend pull` manually when desired).
+      '';
+    };
+
     fetch = mkOption {
       type = types.bool;
       default = true;
-      description = "Git fetch existing repos each cycle";
+      description = ''
+        Plain `git fetch --all --prune` each cycle. Only takes effect when
+        `pull` is false. Kept so a fetch-only daemon remains expressible
+        and so legacy operators who relied on the old fetch-only behavior
+        can opt back into it explicitly (`pull = false; fetch = true;`).
+      '';
     };
 
     quiet = mkOption {
@@ -383,7 +411,7 @@ in {
 
       (mkSystemdService {
         name = "tend-daemon";
-        description = "Tend workspace daemon — sync + fetch repos";
+        description = "Tend workspace daemon — sync + pull repos (reconciler)";
         command = "${cfg.package}/bin/tend";
         args = daemonArgs;
         env = daemonEnv;
