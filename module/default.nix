@@ -20,6 +20,7 @@ with lib; let
   inherit (hmHelpers) mkLaunchdService mkSystemdService;
   cfg = config.services.tend.daemon;
   fcfg = config.services.tend.flakeUpdate;
+  pcfg = config.services.tend.prebuild;
   isDarwin = pkgs.stdenv.isDarwin;
 
   logDir =
@@ -47,6 +48,23 @@ with lib; let
     ++ optionals fcfg.quiet ["--quiet"]
     ++ optionals (fcfg.workspace != null) ["--workspace" fcfg.workspace]
     ++ optionals (fcfg.githubTokenFile != null) ["--github-token-file" fcfg.githubTokenFile];
+
+  # `tend prebuild-daemon` — sibling of flake-update-daemon. Walks each
+  # workspace, builds repos whose HEAD has moved since last cycle,
+  # optionally pushes the resulting closures to an Attic cache. The
+  # systemd/launchd unit applies resource caps so the daemon stays a
+  # background citizen on a shared host.
+  prebuildArgs =
+    ["prebuild-daemon"
+     "--min-interval" (toString pcfg.minInterval)
+     "--max-interval" (toString pcfg.maxInterval)
+     "--max-inflight" (toString pcfg.maxInflight)]
+    ++ optionals pcfg.quiet ["--quiet"]
+    ++ optionals (pcfg.workspace != null) ["--workspace" pcfg.workspace]
+    ++ optionals (pcfg.atticCache != null) ["--attic-cache" pcfg.atticCache]
+    ++ optionals (pcfg.atticServer != null) ["--attic-server" pcfg.atticServer]
+    ++ optionals (pcfg.atticUrl != null) ["--attic-url" pcfg.atticUrl]
+    ++ optionals (pcfg.atticTokenFile != null) ["--attic-token-file" pcfg.atticTokenFile];
 
   # Paths to binaries the tend daemons shell out to (nix, git, gh, etc.).
   # launchd and systemd don't inherit the user's interactive shell PATH,
@@ -80,6 +98,13 @@ with lib; let
       HOME = config.home.homeDirectory;
     }
     // cfg.extraEnv;
+
+  prebuildEnv =
+    {
+      PATH = tendPath;
+      HOME = config.home.homeDirectory;
+    }
+    // pcfg.extraEnv;
 in {
   options.services.tend.daemon = {
     enable = mkOption {
@@ -301,6 +326,192 @@ in {
     };
   };
 
+  options.services.tend.prebuild = {
+    enable = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Enable the tend prebuild daemon — runs `tend prebuild-daemon`
+        as a launchd (Darwin) or systemd (Linux) service. The daemon
+        walks every workspace, builds repos whose HEAD has moved since
+        last cycle, and (if `atticCache` is set) pushes each resulting
+        closure to the Attic binary cache via `attic push <cache>
+        <out-path>`. Pairs with `services.tend.daemon` (which pulls)
+        and `services.tend.flakeUpdate` (which propagates lock bumps)
+        to form the full reconcile-then-build-then-cache loop:
+
+          tend.daemon       — every 5 min, git pull every workspace repo
+          tend.flakeUpdate  — exp-backoff propagate flake.lock bumps
+          tend.prebuild     — exp-backoff build new HEADs + push closures
+
+        Sleep interval doubles on converged cycles (zero builds) up to
+        `maxInterval`; any successful build resets to `minInterval`.
+
+        Per-cycle parallelism is capped by `maxInflight` (default 1
+        for shared workstations; raise to 2-4 on a dedicated build
+        host like rio). Resource ceilings are best enforced via the
+        systemd/launchd unit's CPUQuota/MemoryHigh/IOWeight (see
+        rio's wiring for an example) — keeping the daemon a
+        background citizen on a shared host.
+      '';
+    };
+
+    package = mkOption {
+      type = types.package;
+      default = pkgs.tend;
+      description = "Tend package providing the tend binary";
+    };
+
+    minInterval = mkOption {
+      type = types.int;
+      default = 120;
+      description = ''
+        Minimum sleep between cycles (seconds). Default 120s is more
+        conservative than flake-update (60s) because each prebuild
+        cycle can kick off many `nix build` invocations.
+      '';
+    };
+
+    maxInterval = mkOption {
+      type = types.int;
+      default = 3600;
+      description = "Maximum sleep between cycles when converged (seconds).";
+    };
+
+    maxInflight = mkOption {
+      type = types.int;
+      default = 1;
+      description = ''
+        Maximum concurrent `nix build` invocations per cycle. Each
+        build still parallelises internally per `max-jobs`, so 1 is
+        a safe default. Raise to 2-4 on dedicated builders.
+      '';
+    };
+
+    workspace = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Limit to a specific workspace by name (null = all workspaces).";
+    };
+
+    quiet = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Suppress per-step output (recommended for daemon mode).";
+    };
+
+    atticCache = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "nexus";
+      description = ''
+        Attic cache name to push built closures to. If null, prebuild
+        builds without pushing (closures still land in /nix/store and
+        get swept by the periodic `attic-store-push` timer).
+      '';
+    };
+
+    atticServer = mkOption {
+      type = types.nullOr types.str;
+      default = "nexus";
+      description = "Attic server alias for `attic login`.";
+    };
+
+    atticUrl = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "http://rio:8080/";
+      description = "Attic server URL. Required when atticCache is set.";
+    };
+
+    atticTokenFile = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/run/secrets/attic/jwt/token";
+      description = ''
+        Path to a file containing the Attic JWT token. SOPS-managed
+        on pleme-io clusters (`attic/jwt/token`). Required when
+        atticCache is set.
+      '';
+    };
+
+    extraEnv = mkOption {
+      type = types.attrsOf types.str;
+      default = {};
+      description = ''
+        Extra environment variables to set on the prebuild daemon's
+        launchd/systemd service, merged on top of the defaults
+        (PATH, HOME).
+      '';
+    };
+
+    # Resource caps — passed straight through to the systemd unit's
+    # `Service` section. Defaults size for rio (16C/32T, 32 GB RAM)
+    # but every host overrides; the systemd defaults if unset are
+    # "no limit", which is fine for dedicated builders.
+    cpuQuota = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "400%";
+      description = ''
+        systemd `CPUQuota=` for the prebuild daemon unit (Linux only).
+        Examples: `"400%"` = 4 of N cores, `"50%"` = half a core.
+        Null = no quota (use the whole host).
+      '';
+    };
+
+    memoryHigh = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "8G";
+      description = ''
+        systemd `MemoryHigh=` for the prebuild daemon unit (Linux only).
+        Kernel begins throttling above this; soft cap, not OOM.
+        Null = no cap.
+      '';
+    };
+
+    memoryMax = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "16G";
+      description = ''
+        systemd `MemoryMax=` (hard limit; OOM-kills above this).
+        Null = no cap.
+      '';
+    };
+
+    ioWeight = mkOption {
+      type = types.nullOr types.int;
+      default = null;
+      example = 50;
+      description = ''
+        systemd `IOWeight=` (1-10000, default 100). Lower than 100
+        deprioritises the daemon's disk I/O behind interactive work.
+      '';
+    };
+
+    logRotation = {
+      maxSize = mkOption {
+        type = types.str;
+        default = "10M";
+        description = "Maximum log file size before rotation";
+      };
+
+      keep = mkOption {
+        type = types.int;
+        default = 3;
+        description = "Number of rotated log files to keep";
+      };
+
+      compress = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Compress rotated log files";
+      };
+    };
+  };
+
   config = mkMerge [
     # Darwin: launchd agent + newsyslog log rotation
     (mkIf (cfg.enable && isDarwin) (mkMerge [
@@ -447,6 +658,106 @@ in {
               notifempty
               copytruncate
           }
+        '';
+      }
+    ]))
+
+    # Linux: prebuild daemon + resource caps + logrotate config
+    (mkIf (pcfg.enable && !isDarwin) (mkMerge [
+      {
+        home.activation.tend-prebuild-log-dir = lib.hm.dag.entryAfter ["writeBoundary"] ''
+          run mkdir -p "${logDir}"
+        '';
+      }
+
+      (mkSystemdService {
+        name = "tend-prebuild";
+        description = "Tend prebuild daemon — build new HEADs + push closures to Attic";
+        command = "${pcfg.package}/bin/tend";
+        args = prebuildArgs;
+        env = prebuildEnv;
+      })
+
+      # Augment the Service block produced by mkSystemdService with
+      # resource caps. None of these are set unless the operator
+      # explicitly opts in via the corresponding `services.tend.prebuild.*`
+      # option, so the default behaviour matches the other tend daemons.
+      {
+        systemd.user.services.tend-prebuild.Service =
+          (optionalAttrs (pcfg.cpuQuota != null) {
+            CPUQuota = pcfg.cpuQuota;
+          })
+          // (optionalAttrs (pcfg.memoryHigh != null) {
+            MemoryHigh = pcfg.memoryHigh;
+          })
+          // (optionalAttrs (pcfg.memoryMax != null) {
+            MemoryMax = pcfg.memoryMax;
+          })
+          // (optionalAttrs (pcfg.ioWeight != null) {
+            IOWeight = toString pcfg.ioWeight;
+          });
+      }
+
+      {
+        home.file.".config/logrotate.d/tend-prebuild".text = ''
+          ${logDir}/tend-prebuild.log ${logDir}/tend-prebuild.err {
+              size ${pcfg.logRotation.maxSize}
+              rotate ${toString pcfg.logRotation.keep}
+              ${optionalString pcfg.logRotation.compress "compress"}
+              missingok
+              notifempty
+              copytruncate
+          }
+        '';
+      }
+    ]))
+
+    # Darwin: prebuild daemon + log rotation (no resource caps — launchd
+    # exposes a different vocabulary; add Niceness/ResourceLimits if
+    # ever needed)
+    (mkIf (pcfg.enable && isDarwin) (mkMerge [
+      {
+        home.activation.tend-prebuild-log-dir = lib.hm.dag.entryAfter ["writeBoundary"] ''
+          run mkdir -p "${logDir}"
+        '';
+      }
+
+      (mkLaunchdService {
+        name = "tend-prebuild";
+        label = "io.pleme.tend-prebuild";
+        command = "${pcfg.package}/bin/tend";
+        args = prebuildArgs;
+        env = prebuildEnv;
+        logDir = logDir;
+      })
+
+      {
+        home.file.".local/share/tend/newsyslog.d/tend-prebuild.conf".text = let
+          logFile = "${logDir}/tend-prebuild.log";
+          errFile = "${logDir}/tend-prebuild.err";
+          count = toString pcfg.logRotation.keep;
+          size = let
+            raw = pcfg.logRotation.maxSize;
+            unit = builtins.substring ((builtins.stringLength raw) - 1) 1 raw;
+            num = builtins.substring 0 ((builtins.stringLength raw) - 1) raw;
+            sizeKB =
+              if unit == "M" || unit == "m"
+              then toString ((lib.toInt num) * 1024)
+              else if unit == "G" || unit == "g"
+              then toString ((lib.toInt num) * 1024 * 1024)
+              else if unit == "K" || unit == "k"
+              then num
+              else raw;
+          in
+            sizeKB;
+          flags =
+            if pcfg.logRotation.compress
+            then "GN"
+            else "N";
+        in ''
+          # logfilename          [owner:group]  mode  count  size  when  flags
+          ${logFile}                             644   ${count}    ${size}  *     ${flags}
+          ${errFile}                             644   ${count}    ${size}  *     ${flags}
         '';
       }
     ]))
