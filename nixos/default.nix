@@ -109,8 +109,11 @@ with lib; let
   # All system daemons share an environment block — PATH spelled out,
   # HOME=stateDir so XDG_* defaults land in /var/lib/tend/{cache,share},
   # GH_CONFIG_DIR pointed at a tend-owned spot so gh CLI works.
+  # NB: NixOS's systemd module also injects a default PATH onto every
+  # unit's `environment`, so we use `lib.mkForce` to make ours win
+  # (the default doesn't include `nix`/`git`, which the daemons need).
   systemEnv = {
-    PATH = systemPath;
+    PATH = lib.mkForce systemPath;
     HOME = cfg.stateDir;
     XDG_CACHE_HOME = "${cfg.stateDir}/cache";
     XDG_DATA_HOME = "${cfg.stateDir}/share";
