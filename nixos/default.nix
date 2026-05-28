@@ -337,6 +337,30 @@ in {
         default = true;
         description = "Suppress per-repo log lines.";
       };
+      cpuQuota = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "200%";
+        description = "systemd CPUQuota for the daemon (pull) unit.";
+      };
+      memoryHigh = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "1G";
+        description = "systemd MemoryHigh (soft throttle).";
+      };
+      memoryMax = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "2G";
+        description = "systemd MemoryMax (hard OOM ceiling).";
+      };
+      ioWeight = mkOption {
+        type = types.nullOr types.int;
+        default = null;
+        example = 60;
+        description = "systemd IOWeight (lower de-prioritises behind interactive I/O).";
+      };
     };
 
     # ───────────── flakeUpdate (lock propagation) ────────────
@@ -365,6 +389,30 @@ in {
         type = types.bool;
         default = true;
         description = "Suppress per-step output.";
+      };
+      cpuQuota = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "200%";
+        description = "systemd CPUQuota for the flake-update unit.";
+      };
+      memoryHigh = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "2G";
+        description = "systemd MemoryHigh.";
+      };
+      memoryMax = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "3G";
+        description = "systemd MemoryMax.";
+      };
+      ioWeight = mkOption {
+        type = types.nullOr types.int;
+        default = null;
+        example = 70;
+        description = "systemd IOWeight.";
       };
     };
 
@@ -489,12 +537,22 @@ in {
       (mkUnit {
         description = "tend — workspace pull/reconcile (system, runs as ${cfg.user})";
         args = daemonArgs;
+        extraServiceConfig =
+          (optionalAttrs (cfg.daemon.cpuQuota != null) { CPUQuota = cfg.daemon.cpuQuota; })
+          // (optionalAttrs (cfg.daemon.memoryHigh != null) { MemoryHigh = cfg.daemon.memoryHigh; })
+          // (optionalAttrs (cfg.daemon.memoryMax != null) { MemoryMax = cfg.daemon.memoryMax; })
+          // (optionalAttrs (cfg.daemon.ioWeight != null) { IOWeight = toString cfg.daemon.ioWeight; });
       });
 
     systemd.services."tend-system-flake-update" = mkIf cfg.flakeUpdate.enable
       (mkUnit {
         description = "tend — flake.lock propagation (system, runs as ${cfg.user})";
         args = flakeUpdateArgs;
+        extraServiceConfig =
+          (optionalAttrs (cfg.flakeUpdate.cpuQuota != null) { CPUQuota = cfg.flakeUpdate.cpuQuota; })
+          // (optionalAttrs (cfg.flakeUpdate.memoryHigh != null) { MemoryHigh = cfg.flakeUpdate.memoryHigh; })
+          // (optionalAttrs (cfg.flakeUpdate.memoryMax != null) { MemoryMax = cfg.flakeUpdate.memoryMax; })
+          // (optionalAttrs (cfg.flakeUpdate.ioWeight != null) { IOWeight = toString cfg.flakeUpdate.ioWeight; });
       });
 
     systemd.services."tend-system-prebuild" = mkIf cfg.prebuild.enable
