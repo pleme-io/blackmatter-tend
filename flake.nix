@@ -17,5 +17,6 @@
       modules.homeManager = import ./module {
         hmHelpers = import "${substrate}/lib/hm-service-helpers.nix" { lib = nixpkgs.lib; };
       };
+      modules.nixos = ./nixos;
     };
 }
