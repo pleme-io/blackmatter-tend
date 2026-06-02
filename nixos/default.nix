@@ -73,6 +73,8 @@ with lib; let
       "--max-interval" (toString cfg.prebuild.maxInterval)
       "--max-inflight" (toString cfg.prebuild.maxInflight) ]
     ++ optionals cfg.prebuild.quiet [ "--quiet" ]
+    ++ [ "--packages" cfg.prebuild.packages
+         "--repro" cfg.prebuild.repro ]
     ++ optionals (cfg.prebuild.workspace != null)
       [ "--workspace" cfg.prebuild.workspace ]
     ++ optionals (cfg.prebuild.atticCache != null)
@@ -451,6 +453,33 @@ in {
         type = types.bool;
         default = true;
         description = "Suppress per-step output.";
+      };
+
+      packages = mkOption {
+        type = types.str;
+        default = "all";
+        example = "default";
+        description = ''
+          Which flake outputs to build per repo: "all" (every
+          `packages.''${system}.*` — max cache coverage, the fill
+          default), "default", or a comma-separated allow-list (e.g.
+          "mado,tear"). Threaded to prebuild-daemon as `--packages`.
+        '';
+      };
+      repro = mkOption {
+        type = types.enum [ "trusting" "verify" ];
+        default = "trusting";
+        description = ''
+          Reproducibility gate before a closure is pushed:
+          "trusting" (fast — correct on Linux, where the build sandbox
+          pins $NIX_BUILD_TOP so rustc's crate SVH is stable) or
+          "verify" (`nix build --rebuild` byte-compare, push only if
+          identical — ~1 extra build/package). Threaded as `--repro`.
+          NOTE: darwin builds are NOT sandbox-deterministic (unstable
+          SVH → cache poison), so darwin nodes must not push to a
+          fleet-substituted cache regardless of this gate — see the
+          2026-06-02 rio-poison incident.
+        '';
       };
 
       atticCache = mkOption {
