@@ -54,11 +54,40 @@ with lib; let
   # optionally pushes the resulting closures to an Attic cache. The
   # systemd/launchd unit applies resource caps so the daemon stays a
   # background citizen on a shared host.
+  # One push destination for the prebuild fan-out. `server` (the
+  # `attic login` alias) defaults to the cache `name`. A cache is only
+  # pushed to when `enabled`.
+  prebuildCacheType = types.submodule ({ config, ... }: {
+    options = {
+      name = mkOption { type = types.str; example = "nexus"; description = "atticd cache name."; };
+      server = mkOption {
+        type = types.str;
+        default = config.name;
+        defaultText = literalExpression "<name>";
+        description = "attic login alias (defaults to name).";
+      };
+      url = mkOption { type = types.str; example = "http://rio:8080/"; description = "Server root URL."; };
+      tokenFile = mkOption { type = types.str; description = "SOPS-managed JWT token file path."; };
+      enabled = mkOption { type = types.bool; default = true; description = "Push to this cache (false = paused)."; };
+    };
+  });
+
+  # Multi-cache fan-out: render the typed `caches` list to the
+  # `--caches-json` Nix→JSON→Rust boundary tend's
+  # prebuild_cache::parse_caches_json consumes (snake_case token_file).
+  prebuildCachesJson = builtins.toJSON (map (c: {
+    inherit (c) name server url enabled;
+    token_file = c.tokenFile;
+  }) pcfg.caches);
+
   prebuildArgs =
     ["prebuild-daemon"
      "--min-interval" (toString pcfg.minInterval)
      "--max-interval" (toString pcfg.maxInterval)
-     "--max-inflight" (toString pcfg.maxInflight)]
+     "--max-inflight" (toString pcfg.maxInflight)
+     "--packages" pcfg.packages
+     "--repro" pcfg.repro]
+    ++ optionals (pcfg.caches != []) ["--caches-json" prebuildCachesJson]
     ++ optionals pcfg.quiet ["--quiet"]
     ++ optionals (pcfg.workspace != null) ["--workspace" pcfg.workspace]
     ++ optionals (pcfg.atticCache != null) ["--attic-cache" pcfg.atticCache]
@@ -432,6 +461,44 @@ in {
         Path to a file containing the Attic JWT token. SOPS-managed
         on pleme-io clusters (`attic/jwt/token`). Required when
         atticCache is set.
+      '';
+    };
+
+    packages = mkOption {
+      type = types.str;
+      default = "all";
+      example = "default";
+      description = ''
+        Which flake outputs to build per repo: "all" (every
+        `packages.''${system}.*` — max cache coverage, the fill default),
+        "default", or a comma-separated allow-list (e.g. "mado,tear"). A
+        `prebuild:` block in tend's config.yaml overrides this.
+      '';
+    };
+
+    repro = mkOption {
+      type = types.enum [ "trusting" "verify" ];
+      default = "trusting";
+      description = ''
+        Reproducibility gate before pushing a closure to the cache:
+        "trusting" (fast) or "verify" (`nix build --rebuild` and push only
+        if the rebuild is byte-identical — never poisons a
+        substitution-source cache with a non-reproducible artifact, at ~1
+        extra top-level build per package). Recommended for any node
+        pushing to a cache the fleet substitutes from.
+      '';
+    };
+
+    caches = mkOption {
+      type = types.listOf prebuildCacheType;
+      default = [];
+      example = literalExpression ''[ { name = "nexus"; url = "http://rio:8080/"; tokenFile = "/run/secrets/attic/jwt/token"; } ]'';
+      description = ''
+        Binary caches every built closure fans out to. Empty (default) =
+        use the single `attic*` quartet above (legacy single-cache). A
+        non-empty list takes precedence and enables multi-cache fan-out;
+        each closure pushes to every enabled cache at most once per cycle
+        (in-memory dedup across the org's overlapping closures).
       '';
     };
 
