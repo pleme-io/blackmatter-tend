@@ -80,6 +80,17 @@ with lib; let
     token_file = c.tokenFile;
   }) pcfg.caches);
 
+  # Reachability probe needs ONE url. Prefer the explicit single
+  # `atticUrl`; else derive from the first enabled cache in the
+  # multi-cache list. The single `--attic-*` quartet also serves as the
+  # legacy fallback tend uses when `--caches-json` is empty.
+  enabledPrebuildCaches = filter (c: c.enabled) pcfg.caches;
+  prebuildPrimary = if enabledPrebuildCaches != [] then head enabledPrebuildCaches else null;
+  prebuildProbeUrl =
+    if pcfg.atticUrl != null then pcfg.atticUrl
+    else if prebuildPrimary != null then prebuildPrimary.url
+    else null;
+
   prebuildArgs =
     ["prebuild-daemon"
      "--min-interval" (toString pcfg.minInterval)
@@ -92,8 +103,14 @@ with lib; let
     ++ optionals (pcfg.workspace != null) ["--workspace" pcfg.workspace]
     ++ optionals (pcfg.atticCache != null) ["--attic-cache" pcfg.atticCache]
     ++ optionals (pcfg.atticServer != null) ["--attic-server" pcfg.atticServer]
-    ++ optionals (pcfg.atticUrl != null) ["--attic-url" pcfg.atticUrl]
-    ++ optionals (pcfg.atticTokenFile != null) ["--attic-token-file" pcfg.atticTokenFile];
+    ++ optionals (prebuildProbeUrl != null) ["--attic-url" prebuildProbeUrl]
+    ++ optionals (pcfg.atticTokenFile != null) ["--attic-token-file" pcfg.atticTokenFile]
+    # Reachability-aware backoff: when the cache is unreachable, probe +
+    # back off instead of building closures we can't push.
+    ++ ["--attic-probe" (if pcfg.reachability.enable then "true" else "false")
+        "--attic-unreachable-min-interval" (toString pcfg.reachability.minInterval)
+        "--attic-unreachable-max-interval" (toString pcfg.reachability.maxInterval)
+        "--attic-probe-timeout" (toString pcfg.reachability.probeTimeout)];
 
   # Paths to binaries the tend daemons shell out to (nix, git, gh, etc.).
   # launchd and systemd don't inherit the user's interactive shell PATH,
@@ -502,6 +519,45 @@ in {
       '';
     };
 
+    reachability = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Probe whether the primary cache is reachable before each cycle;
+          when it's down (laptop off the tailnet, server asleep), back off
+          separately from the converged backoff and don't build closures
+          we can't push. Resumes automatically on reachability.
+        '';
+      };
+      minInterval = mkOption {
+        type = types.int;
+        default = 60;
+        description = "Floor of the unreachable-backoff, in seconds.";
+      };
+      maxInterval = mkOption {
+        type = types.int;
+        default = 1800;
+        description = "Ceiling of the unreachable-backoff, in seconds.";
+      };
+      probeTimeout = mkOption {
+        type = types.int;
+        default = 5;
+        description = "Per-probe HTTP timeout, in seconds.";
+      };
+    };
+
+    processType = mkOption {
+      type = types.enum [ "Background" "Standard" "Adaptive" "Interactive" ];
+      default = "Background";
+      description = ''
+        launchd ProcessType (Darwin). "Background" throttles CPU + uses
+        low-priority IO for the whole process tree — the key gentleness
+        knob for a workstation. (Linux gentleness is the systemd
+        CPUQuota/MemoryHigh/IOWeight caps below.)
+      '';
+    };
+
     extraEnv = mkOption {
       type = types.attrsOf types.str;
       default = {};
@@ -796,6 +852,8 @@ in {
         args = prebuildArgs;
         env = prebuildEnv;
         logDir = logDir;
+        # Gentle by default — macOS throttles CPU + IO for the tree.
+        processType = pcfg.processType;
       })
 
       {
